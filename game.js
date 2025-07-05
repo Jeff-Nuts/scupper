@@ -22,13 +22,20 @@ const DASH_REPLENISH_COOLDOWN = 1500; // 1.5 seconds
 
 // Combat Constants
 const PLAYER_SHOOT_COOLDOWN = 80;
-const MELEE_RANGE = 40;
-const MELEE_COOLDOWN = 500;
-const MELEE_KNOCKBACK_FORCE = 350;
+const MELEE_RANGE = 150;
+const MELEE_COOLDOWN = 400;
+const MELEE_KNOCKBACK_FORCE = 1000;
+const MELEE_ANIMATION_DURATION = 180;
 const STUN_DURATION = 1000;
+const SLASH_WIDTH = 90;  // The length of the slash arc.
+const SLASH_CURVE = 90;   // How much the slash curves. Higher number = bigger arc.
+const SLASH_OFFSET =50;  // NEW: How far from the player's center the slash appears.
+
 
 // Enemy-specific constants
 const BASE_ENEMY_SHOOT_COOLDOWN = 800;
+const ENEMY_SEPARATION_RADIUS = 60;
+const ENEMY_SEPARATION_FORCE = 600;
 
 const MELEE_ENEMY_ATTACK_RANGE = 40;
 const MELEE_ENEMY_COOLDOWN = 1000;
@@ -44,7 +51,7 @@ const SHOOTER_MAX_ENGAGE_DISTANCE = 400;
 // ===================================================================
 
 class Player extends Phaser.Physics.Arcade.Sprite {
-	constructor(scene, x, y, keys) {
+	constructor(scene, x, y, keys, meleeManager) {
 		super(scene, x, y, 'solid');
 		this.setDisplaySize(20, 20);
 		scene.add.existing(this);
@@ -65,6 +72,7 @@ class Player extends Phaser.Physics.Arcade.Sprite {
 		this.lastShotTime = 0;
 		this.lastMeleeTime = 0;
 		this.keys = keys;
+		this.meleeManager = meleeManager;
 	}
 	handleInput() {
 		if (this.isDashing) return;
@@ -108,29 +116,24 @@ class Player extends Phaser.Physics.Arcade.Sprite {
 		this.lastShotTime = now;
 		this.scene.playerPellets.fire(this.x, this.y, targetX, targetY);
 	}
-	// MODIFIED: `performMelee` now takes target coordinates and checks direction.
 	performMelee(targetX, targetY) {
 		const now = this.scene.time.now;
 		if (now - this.lastMeleeTime < MELEE_COOLDOWN) return;
 		this.lastMeleeTime = now;
-
-		// Calculate the angle towards the mouse cursor
+	
+		// Use the coordinates that were passed in.
 		const angleToCursor = Phaser.Math.Angle.Between(this.x, this.y, targetX, targetY);
-		this.scene.meleeManager.swing(this.x, this.y, angleToCursor);
-
-		// Check for enemies within the melee arc
+	
+		// Call the manager, passing "this" (the player instance) and the coordinates.
+		this.meleeManager.swing(this, targetX, targetY);
+	
 		this.scene.enemies.getChildren().forEach(enemy => {
 			if (!enemy.active || enemy.isStunned) return;
-
 			const distance = Phaser.Math.Distance.Between(this.x, this.y, enemy.x, enemy.y);
-
-			// 1. Is the enemy within melee range?
 			if (distance < MELEE_RANGE) {
 				const angleToEnemy = Phaser.Math.Angle.Between(this.x, this.y, enemy.x, enemy.y);
-				// 2. Is the angle to the enemy within our 90-degree swing arc?
 				const angleDifference = Math.abs(Phaser.Math.Angle.Wrap(angleToEnemy - angleToCursor));
-
-				if (angleDifference <= Phaser.Math.DegToRad(45)) { // 45 degrees on either side of the center line
+				if (angleDifference <= Phaser.Math.DegToRad(50)) {
 					enemy.stunAndKnockback(this.x, this.y);
 				}
 			}
@@ -192,7 +195,7 @@ class BaseEnemy extends Phaser.Physics.Arcade.Sprite {
 		scene.physics.add.existing(this);
 		this.setCollideWorldBounds(true);
 		this.body.setSize(1, 1);
-		this.setDragX(PLAYER_SPEED / (1 - FRICTION));
+		this.setDrag(500, 0);
 		this.health = 100;
 		this.maxHealth = 100;
 		this.speed = 150;
@@ -205,7 +208,6 @@ class BaseEnemy extends Phaser.Physics.Arcade.Sprite {
 		this.wallJumpsRemaining = MAX_WALL_JUMPS;
 		this.wallSlideSpeed = WALL_SLIDE_SPEED / 2;
 	}
-
 	performWallJump() {
 		if (this.wallJumpsRemaining <= 0) return;
 		const onLeftWall = this.body.blocked.left;
@@ -217,7 +219,22 @@ class BaseEnemy extends Phaser.Physics.Arcade.Sprite {
 		this.setVelocityX(kickX);
 		this.direction = onLeftWall ? 'right' : 'left';
 	}
-
+	applySeparation() {
+		let separationX = 0;
+		this.scene.enemies.getChildren().forEach(otherEnemy => {
+			if (otherEnemy === this || !otherEnemy.active) return;
+			const distance = Phaser.Math.Distance.Between(this.x, this.y, otherEnemy.x, otherEnemy.y);
+			if (distance < ENEMY_SEPARATION_RADIUS) {
+				const pushForce = (ENEMY_SEPARATION_RADIUS - distance) / ENEMY_SEPARATION_RADIUS;
+				separationX += (this.x - otherEnemy.x) * pushForce;
+			}
+		});
+		const totalSeparation = new Phaser.Math.Vector2(separationX, 0);
+		if (totalSeparation.length() > 0) {
+			totalSeparation.normalize().scale(ENEMY_SEPARATION_FORCE);
+			this.setAccelerationX(this.body.acceleration.x + totalSeparation.x);
+		}
+	}
 	stunAndKnockback(fromX, fromY) {
 		this.isStunned = true;
 		const angle = Phaser.Math.Angle.Between(fromX, fromY, this.x, this.y);
@@ -227,7 +244,6 @@ class BaseEnemy extends Phaser.Physics.Arcade.Sprite {
 			this.isStunned = false;
 		});
 	}
-
 	takeDamage(amount) {
 		this.health -= amount;
 		if (this.health <= 0) {
@@ -235,18 +251,15 @@ class BaseEnemy extends Phaser.Physics.Arcade.Sprite {
 			this.destroy();
 		}
 	}
-
 	shootAtPlayer(time) {
 		const player = this.scene.player;
 		if (!player.active || !player.body) return;
-
 		if (time > this.lastShotTime + this.shootCooldown) {
 			this.lastShotTime = time;
 			const spawnY = this.y - 10;
 			this.scene.enemyPellets.fire(this.x, spawnY, player.x, player.y);
 		}
 	}
-
 	update(time, delta) {
 		if (!this.active) return;
 		const barWidth = 30;
@@ -259,8 +272,10 @@ class BaseEnemy extends Phaser.Physics.Arcade.Sprite {
 			.fillStyle(0x00ff00).fillRect(barX, barY, barWidth * healthPercentage, barHeight);
 		if (this.isStunned) {
 			this.setTint(0x800080);
+			this.setAcceleration(0, 0);
 			return;
 		}
+		this.setAccelerationX(0);
 		const onGround = this.body.blocked.down;
 		const onWall = this.body.blocked.left || this.body.blocked.right;
 		if (onGround) {
@@ -270,33 +285,30 @@ class BaseEnemy extends Phaser.Physics.Arcade.Sprite {
 			this.setVelocityY(this.wallSlideSpeed);
 		}
 		this.updateAI(time, delta);
+		this.applySeparation();
 		if (this.y > this.scene.sys.game.config.height + 50) {
 			this.setPosition(425, 140);
 			this.setVelocity(0, 0);
 			this.health = this.maxHealth;
 		}
 	}
-
-	updateAI(time, delta) {
-		// Implemented by subclasses
-	}
+	updateAI(time, delta) {}
 }
 
 class MeleeEnemy extends BaseEnemy {
 	constructor(scene, x, y) {
 		super(scene, x, y);
-		this.setTint(0xff0000); // Red for melee
-		this.speed = 150;
+		this.setTint(0xff0000);
+		this.speed = 800;
 		this.lastMeleeTime = 0;
 		this.health = 150;
 		this.maxHealth = 150;
 		this.hasSpottedPlayer = false;
 	}
-
 	performMelee(player, time) {
 		this.lastMeleeTime = time;
 		player.takeDamage(MELEE_ENEMY_DAMAGE);
-		this.scene.tweens.add({ // Visual feedback for attack
+		this.scene.tweens.add({
 			targets: this,
 			scaleX: 1.2,
 			scaleY: 1.2,
@@ -305,60 +317,43 @@ class MeleeEnemy extends BaseEnemy {
 			ease: 'Power1'
 		});
 	}
-
 	updateAI(time, delta) {
 		this.setTint(this.hasSpottedPlayer ? 0xFF4500 : 0xff0000);
-
 		const player = this.scene.player;
 		if (!player.active) return;
-
 		const horizontalDist = player.x - this.x;
 		const verticalDist = player.y - this.y;
 		const distance = Phaser.Math.Distance.Between(this.x, this.y, player.x, player.y);
-
 		const onWall = this.body.blocked.left || this.body.blocked.right;
 		const onGround = this.body.blocked.down;
 		const playerIsAbove = player.y < this.y - this.height;
-
 		if (!this.hasSpottedPlayer && distance < MELEE_ENEMY_INITIAL_AGGRO_RANGE) {
 			this.hasSpottedPlayer = true;
 		}
-
 		if (this.hasSpottedPlayer) {
 			if (distance > MELEE_ENEMY_ATTACK_RANGE - 5) {
-				if (horizontalDist > 0) {
-					this.setVelocityX(this.speed);
-					this.direction = 'right';
-				} else {
-					this.setVelocityX(-this.speed);
-					this.direction = 'left';
-				}
+				if (horizontalDist > 0) this.setAccelerationX(this.speed);
+				else this.setAccelerationX(-this.speed);
 			} else {
-				this.setVelocityX(0);
+				this.setAccelerationX(0);
 			}
 		}
-
 		if (distance < MELEE_ENEMY_ATTACK_RANGE && time > this.lastMeleeTime + MELEE_ENEMY_COOLDOWN) {
 			this.performMelee(player, time);
 		}
-
 		if (onWall && !onGround && playerIsAbove) {
 			this.performWallJump();
 			return;
 		}
-
 		if (onGround && verticalDist < -this.height * 2) {
 			this.setVelocityY(-this.jumpPower);
 		}
-
 		if (onGround && Math.abs(horizontalDist) > this.width) {
 			const lookAheadX = this.x + (this.direction === 'right' ? this.width : -this.width);
 			const wallInFront = this.scene.platforms.getChildren().some(p =>
 				p.body.hitTest(lookAheadX, this.y) && p.body.height > this.height
 			);
-			if (wallInFront) {
-				this.setVelocityY(-this.jumpPower);
-			}
+			if (wallInFront) this.setVelocityY(-this.jumpPower);
 		}
 	}
 }
@@ -367,62 +362,51 @@ class ShooterEnemy extends BaseEnemy {
 	constructor(scene, x, y) {
 		super(scene, x, y);
 		this.setTint(0x32a852);
-		this.speed = 140;
+		this.speed = 700;
 		this.shootCooldown = SHOOTER_ENEMY_SHOOT_COOLDOWN;
 	}
-
 	hasLineOfSight(target) {
 		const lineOfSight = new Phaser.Geom.Line(this.x, this.y, target.x, target.y);
 		const platforms = this.scene.platforms.getChildren();
-
 		for (let i = 0; i < platforms.length; i++) {
 			const plat = platforms[i];
 			const platBounds = plat.getBounds();
-			if (Phaser.Geom.Intersects.LineToRectangle(lineOfSight, platBounds)) {
-				return false;
-			}
+			if (Phaser.Geom.Intersects.LineToRectangle(lineOfSight, platBounds)) return false;
 		}
 		return true;
 	}
-
 	updateAI(time, delta) {
 		this.setTint(0x32a852);
 		const player = this.scene.player;
 		if (!player.active) return;
-
 		const distance = Phaser.Math.Distance.Between(this.x, this.y, player.x, player.y);
 		const hasLOS = this.hasLineOfSight(player);
-
 		const onWall = this.body.blocked.left || this.body.blocked.right;
 		const onGround = this.body.blocked.down;
-
 		if (onWall && !onGround && this.body.velocity.y >= 0) {
 			this.performWallJump();
 			return;
 		}
-
 		if (hasLOS) {
 			this.shootAtPlayer(time);
 			if (distance < SHOOTER_MIN_FLEE_DISTANCE) {
-				if (player.x < this.x) this.setVelocityX(this.speed);
-				else this.setVelocityX(-this.speed);
+				if (player.x < this.x) this.setAccelerationX(this.speed);
+				else this.setAccelerationX(-this.speed);
 			} else if (distance > SHOOTER_MAX_ENGAGE_DISTANCE) {
-				if (player.x > this.x) this.setVelocityX(this.speed);
-				else this.setVelocityX(-this.speed);
+				if (player.x > this.x) this.setAccelerationX(this.speed);
+				else this.setAccelerationX(-this.speed);
 			} else {
-				this.setVelocityX(0);
+				this.setAccelerationX(0);
 			}
 		} else {
-			if (player.x > this.x) this.setVelocityX(this.speed * 0.75);
-			else this.setVelocityX(-this.speed * 0.75);
+			if (player.x > this.x) this.setAccelerationX(this.speed * 0.75);
+			else this.setAccelerationX(-this.speed * 0.75);
 		}
-
 		if (onGround && (this.body.blocked.left || this.body.blocked.right)) {
 			this.setVelocityY(-this.jumpPower * 0.8);
 		}
 	}
 }
-
 
 // ===================================================================
 // PROJECTILE & OTHER CLASSES
@@ -498,28 +482,110 @@ class EnemyPellet extends Phaser.Physics.Arcade.Sprite {
 		}
 	}
 }
+// Constants to define the slash's appearance. Tweak these to your liking.
+
+
 class MeleeManager {
 	constructor(scene) {
 		this.scene = scene;
-		this.graphics = scene.add.graphics();
+		this.textureKey = 'melee_slash_texture';
+
+		console.log('[MeleeManager] Initializing...');
+
+		// Check if texture already exists (e.g., from a hot-reload in development)
+		if (this.scene.textures.exists(this.textureKey)) {
+			console.log('[MeleeManager] Texture already exists. Skipping creation.');
+			return;
+		}
+
+		this.createSlashTexture();
 	}
-	// MODIFIED: `swing` now takes an angle instead of a direction
-	swing(x, y, angle) {
-		this.graphics.clear();
-		this.graphics.lineStyle(3, 0xFFFFFF, 0.8);
-		const radius = MELEE_RANGE;
 
-		// A 90-degree swing arc, centered on the provided angle
-		const swingArcWidth = Phaser.Math.DegToRad(90);
-		const startAngle = angle - swingArcWidth / 2;
-		const endAngle = angle + swingArcWidth / 2;
+	createSlashTexture() {
+		try {
+			const graphics = this.scene.add.graphics();
+			const curve = new Phaser.Curves.QuadraticBezier(
+				new Phaser.Math.Vector2(0, SLASH_CURVE),
+				new Phaser.Math.Vector2(SLASH_WIDTH / 2, 0),
+				new Phaser.Math.Vector2(SLASH_WIDTH, SLASH_CURVE)
+			);
+			
+			// Let's simplify the texture height calculation.
+			// The curve starts at y=SLASH_CURVE and dips to y=0, so the height is just SLASH_CURVE.
+			// We will draw it at the top of the graphics object.
+			
+			for (let i = 0; i < 7; i++) {
+				graphics.lineStyle(18 - (i * 2.5), 0xffffff, 1.0 - (i * 0.15));
+				curve.draw(graphics);
+			}
 
-		this.graphics.beginPath();
-		this.graphics.arc(x, y, radius, startAngle, endAngle, false);
-		this.graphics.strokePath();
+			graphics.generateTexture(this.textureKey, SLASH_WIDTH, SLASH_CURVE);
+			graphics.destroy();
+			
+			// DEBUG: Confirm the texture was created and is valid.
+			const texture = this.scene.textures.get(this.textureKey);
+			console.log(`[MeleeManager] Texture created successfully! Key: "${this.textureKey}", Size: ${texture.width}x${texture.height}`);
 
-		this.scene.time.delayedCall(150, () => {
-			this.graphics.clear();
+		} catch (e) {
+			console.error('[MeleeManager] FATAL ERROR during texture creation:', e);
+		}
+	}
+
+	swing(player, targetX, targetY) {
+		// =================================================================
+		//  DEBUG STEP 1: Validate incoming data
+		// =================================================================
+		if (!player || typeof player.x === 'undefined' || typeof targetX === 'undefined') {
+			console.error('[MeleeManager] SWING FAILED: Invalid data received.', { player, targetX, targetY });
+			return; // Stop execution if data is bad
+		}
+		console.log(`[MeleeManager] Swing initiated. Player at (${player.x.toFixed(2)}, ${player.y.toFixed(2)}), Target at (${targetX.toFixed(2)}, ${targetY.toFixed(2)})`);
+
+		// =================================================================
+		//  STEP 2: Calculate angle and position
+		// =================================================================
+		const angle = Phaser.Math.Angle.Between(player.x, player.y, targetX, targetY);
+		const slashX = player.x + Math.cos(angle) * SLASH_OFFSET;
+		const slashY = player.y + Math.sin(angle) * SLASH_OFFSET;
+
+		// DEBUG: Check the calculated values
+		if (isNaN(angle) || isNaN(slashX)) {
+			console.error('[MeleeManager] SWING FAILED: Calculation resulted in NaN.', { angle, slashX, slashY });
+			return;
+		}
+		console.log(`[MeleeManager] Calculated Angle: ${Phaser.Math.RadToDeg(angle).toFixed(2)} deg, Position: (${slashX.toFixed(2)}, ${slashY.toFixed(2)})`);
+
+		// =================================================================
+		//  STEP 3: Create and configure the sprite
+		// =================================================================
+		const slash = this.scene.add.sprite(slashX, slashY, this.textureKey);
+
+		// **CRITICAL CHANGE**: The origin needs to match how the texture was drawn.
+		// Since our curve is now drawn at the top of the texture area (from y=0 to y=SLASH_CURVE),
+		// the vertical center of the *drawn pixels* is at y=0.5 of that height.
+		// The horizontal center is at x=0.5. So the origin should be (0.5, 0.5).
+		slash.setOrigin(0.5, 0.5);
+
+		slash.setRotation(angle);
+		slash.setDepth(player.depth + 1); // Draw in front
+		slash.setAlpha(1); // Explicitly set alpha to 1 before tweening
+
+		// DEBUG: Log the created sprite object
+		console.log('[MeleeManager] Slash sprite created:', slash);
+
+		// =================================================================
+		//  STEP 4: Animate and clean up
+		// =================================================================
+		this.scene.tweens.add({
+			targets: slash,
+			alpha: { from: 1, to: 0 },
+			scale: { from: 1, to: 1.2 },
+			duration: 200,
+			ease: 'Power2',
+			onComplete: () => {
+				console.log('[MeleeManager] Tween complete, destroying slash sprite.');
+				slash.destroy();
+			}
 		});
 	}
 }
@@ -599,229 +665,112 @@ class GameScene extends Phaser.Scene {
 		ctx.fillStyle = '#ffffff';
 		ctx.fillRect(0, 0, 1, 1);
 		canvas.refresh();
+		this.createSlashTextures();
 	}
+
+	createSlashTextures() {
+		const width = MELEE_RANGE * 2.5;
+		const height = MELEE_RANGE * 2;
+
+		// --- Slash 1: Standard horizontal ---
+		let gfx = this.add.graphics().setVisible(false);
+		this.drawSlash(gfx, 1); // Standard curviness
+		gfx.generateTexture('slash1', width, height);
+		gfx.destroy();
+
+		// --- Slash 2: A slightly flatter slash ---
+		gfx = this.add.graphics().setVisible(false);
+		this.drawSlash(gfx, 0.7); // Less curvy
+		gfx.generateTexture('slash2', width, height);
+		gfx.destroy();
+
+		// --- Slash 3: A more aggressive, curved slash ---
+		gfx = this.add.graphics().setVisible(false);
+		this.drawSlash(gfx, 1.3); // More curvy
+		gfx.generateTexture('slash3', width, height);
+		gfx.destroy();
+
+		// --- Slash 4: Another slight variation ---
+		gfx = this.add.graphics().setVisible(false);
+		this.drawSlash(gfx, 1.1);
+		gfx.generateTexture('slash4', width, height);
+		gfx.destroy();
+	}
+
+	drawSlash(graphics, curviness = 1) {
+		const w = MELEE_RANGE * 2.5;
+		const h = MELEE_RANGE * 2;
+
+		// THE FIX: We draw the curve relative to the texture's top-left (0,0).
+		// This makes the pivot point predictable.
+		const startPoint = new Phaser.Math.Vector2(0, h / 2);
+		const controlPoint = new Phaser.Math.Vector2(w / 2, h / 2 - (MELEE_RANGE * curviness));
+		const endPoint = new Phaser.Math.Vector2(w * 0.9, h * 0.4);
+
+		const curve = new Phaser.Curves.QuadraticBezier(startPoint, controlPoint, endPoint);
+
+		for (let i = 0; i < 6; i++) {
+			const alpha = 1.0 - (i * 0.15);
+			const lineWidth = 15 - (i * 2.5);
+
+			graphics.lineStyle(lineWidth, 0xffffff, alpha);
+			curve.draw(graphics);
+		}
+	}
+
 	create() {
 		this.cameras.main.setBackgroundColor('#87ceeb');
-		// MODIFIED: Removed 'S' key as it's no longer used for melee
-		this.keys = this.input.keyboard.addKeys('W,A,D,E,SHIFT');
+		this.keys = this.input.keyboard.addKeys('W,A,D,E,V,SHIFT,SPACE');
 		this.input.mouse.disableContextMenu();
 		const platformData = [
-			// --- Boundaries ---
-			{
-				x: 0,
-				y: 980,
-				width: 1500,
-				height: 20
-			}, // Floor
-			{
-				x: 0,
-				y: 0,
-				width: 1500,
-				height: 20
-			}, // Ceiling
-			{
-				x: 0,
-				y: 20,
-				width: 20,
-				height: 960
-			}, // Left Wall
-			{
-				x: 1480,
-				y: 20,
-				width: 20,
-				height: 960
-			}, // Right Wall
-
-			// --- Center Structure ---
-			{
-				x: 500,
-				y: 650,
-				width: 500,
-				height: 30
-			}, // Large central platform
-			{
-				x: 650,
-				y: 850,
-				width: 200,
-				height: 20
-			}, // Platform below center
-			{
-				x: 1000,
-				y: 680,
-				width: 20,
-				height: 150
-			}, // Small vertical wall on the right of center
-			{
-				x: 480,
-				y: 680,
-				width: 20,
-				height: 150
-			}, // Small vertical wall on the left of center
-
-			// --- Left Side Structures ---
-			{
-				x: 20,
-				y: 800,
-				width: 300,
-				height: 20
-			}, // Low platform
-			{
-				x: 400,
-				y: 720,
-				width: 30,
-				height: 150
-			}, // Vertical pillar
-			{
-				x: 150,
-				y: 550,
-				width: 250,
-				height: 20
-			}, // Mid-level platform
-			{
-				x: 20,
-				y: 300,
-				width: 200,
-				height: 20
-			}, // High platform
-			{
-				x: 300,
-				y: 150,
-				width: 150,
-				height: 20
-			}, // Floating platform near top-left
-
-			// --- Right Side Structures ---
-			{
-				x: 1200,
-				y: 800,
-				width: 280,
-				height: 20
-			}, // Bottom-right floor
-			{
-				x: 1150,
-				y: 500,
-				width: 20,
-				height: 300
-			}, // Large vertical wall
-			{
-				x: 1250,
-				y: 400,
-				width: 230,
-				height: 20
-			}, // High platform
-			{
-				x: 1000,
-				y: 250,
-				width: 200,
-				height: 20
-			}, // Floating platform near top-right
-			{
-				x: 1350,
-				y: 150,
-				width: 130,
-				height: 20
-			}, // Very top-right ledge
-
-			// --- Floating Blocks ---
-			{
-				x: 800,
-				y: 450,
-				width: 100,
-				height: 20
-			},
-			{
-				x: 600,
-				y: 300,
-				width: 100,
-				height: 20
-			},
-			{
-				x: 1000,
-				y: 100,
-				width: 20,
-				height: 80
-			},
+			{ x: 0, y: 980, width: 1500, height: 20 },
+			{ x: 0, y: 0, width: 1500, height: 20 },
+			{ x: 0, y: 20, width: 20, height: 960 },
+			{ x: 1480, y: 20, width: 20, height: 960 },
+			{ x: 500, y: 650, width: 500, height: 30 },
+			{ x: 650, y: 850, width: 200, height: 20 },
+			{ x: 1000, y: 680, width: 20, height: 150 },
+			{ x: 480, y: 680, width: 20, height: 150 },
+			{ x: 20, y: 800, width: 300, height: 20 },
+			{ x: 400, y: 720, width: 30, height: 150 },
+			{ x: 150, y: 550, width: 250, height: 20 },
+			{ x: 20, y: 300, width: 200, height: 20 },
+			{ x: 300, y: 150, width: 150, height: 20 },
+			{ x: 1200, y: 800, width: 280, height: 20 },
+			{ x: 1150, y: 500, width: 20, height: 300 },
+			{ x: 1250, y: 400, width: 230, height: 20 },
+			{ x: 1000, y: 250, width: 200, height: 20 },
+			{ x: 1350, y: 150, width: 130, height: 20 },
+			{ x: 800, y: 450, width: 100, height: 20 },
+			{ x: 600, y: 300, width: 100, height: 20 },
+			{ x: 1000, y: 100, width: 20, height: 80 },
 		];
 		this.platforms = this.physics.add.staticGroup();
 		platformData.forEach(p => {
 			const plat = this.platforms.create(p.x + p.width / 2, p.y + p.height / 2, 'solid');
 			plat.setDisplaySize(p.width, p.height).setTint(0x654321).refreshBody();
 		});
-		this.player = new Player(this, 50, 200, this.keys);
+		this.player = new Player(this, 50, 200, this.keys, new MeleeManager(this));
 		this.enemies = this.add.group({
 			classType: BaseEnemy,
 			runChildUpdate: true
 		});
-		const meleeSpawns = [{
-				x: 1400,
-				y: 900
-			},
-			{
-				x: 700,
-				y: 900
-			},
-			{
-				x: 100,
-				y: 700
-			},
-			{
-				x: 750,
-				y: 600
-			},
-			{
-				x: 1400,
-				y: 350
-			},
-		];
+		const meleeSpawns = [{ x: 1400, y: 900 }, { x: 700, y: 900 }, { x: 100, y: 700 }, { x: 750, y: 600 }, { x: 1400, y: 350 }, ];
+		const shooterSpawns = [{ x: 750, y: 200 }, { x: 1400, y: 100 }, { x: 80, y: 250 }, { x: 1250, y: 750 }, { x: 200, y: 500 }, ];
+		meleeSpawns.forEach(spawn => this.enemies.add(new MeleeEnemy(this, spawn.x, spawn.y)));
+		shooterSpawns.forEach(spawn => this.enemies.add(new ShooterEnemy(this, spawn.x, spawn.y)));
 
-		const shooterSpawns = [{
-				x: 750,
-				y: 200
-			},
-			{
-				x: 1400,
-				y: 100
-			},
-			{
-				x: 80,
-				y: 250
-			},
-			{
-				x: 1250,
-				y: 750
-			},
-			{
-				x: 200,
-				y: 500
-			},
-		];
-
-		meleeSpawns.forEach(spawn => {
-			this.enemies.add(new MeleeEnemy(this, spawn.x, spawn.y));
-		});
-
-		shooterSpawns.forEach(spawn => {
-			this.enemies.add(new ShooterEnemy(this, spawn.x, spawn.y));
-		});
 		this.playerPellets = new PlayerPelletGroup(this);
 		this.enemyPellets = new EnemyPelletGroup(this);
-		this.meleeManager = new MeleeManager(this);
+		// this.meleeManager = new MeleeManager(this);
 		this.ui = new GameUI(this);
+
 		this.physics.add.collider(this.player, this.platforms);
 		this.physics.add.collider(this.enemies, this.platforms);
 		this.physics.add.overlap(this.playerPellets, this.enemies, this.handlePlayerPelletHitEnemy, null, this);
 		this.physics.add.collider(this.playerPellets, this.platforms, (pellet) => pellet.destroy());
 		this.physics.add.overlap(this.enemyPellets, this.player, this.handleEnemyPelletHitPlayer, null, this);
 		this.physics.add.collider(this.enemyPellets, this.platforms, (pellet) => pellet.destroy());
-
-		// MODIFIED: Add a listener for mouse clicks to handle melee
-		this.input.on('pointerdown', (pointer) => {
-			// Check if the middle mouse button was clicked
-			if (pointer.middleButtonDown()) {
-				this.player.performMelee(pointer.x, pointer.y);
-			}
-		});
-
 		this.cursor = this.add.graphics();
 	}
 	handlePlayerPelletHitEnemy(enemy, pellet) {
@@ -838,13 +787,19 @@ class GameScene extends Phaser.Scene {
 		if (this.player.y > this.sys.game.config.height + 50) {
 			this.player.reset();
 		}
-		// MODIFIED: Check for left button specifically, to avoid shooting on middle click
 		if (this.input.activePointer.isDown && this.input.activePointer.leftButtonDown()) {
 			this.player.shoot(this.input.activePointer.x, this.input.activePointer.y);
 		}
 
-		// MODIFIED: Removed the 'S' key check for melee, it's now handled by the 'pointerdown' event
-		// if (Phaser.Input.Keyboard.JustDown(this.keys.S)) { ... }
+		if (Phaser.Input.Keyboard.JustDown(this.keys.SPACE)) {
+			const pointer = this.input.activePointer;
+			this.player.performMelee(pointer.worldX, pointer.worldY);
+		}
+		// Also change the 'V' key handler to match
+		if (Phaser.Input.Keyboard.JustDown(this.keys.V)) {
+			const pointer = this.input.activePointer;
+			this.player.performMelee(pointer.worldX, pointer.worldY);
+		}
 
 		if (Phaser.Input.Keyboard.JustDown(this.keys.SHIFT)) {
 			this.player.performDash();
