@@ -22,11 +22,21 @@ const DASH_REPLENISH_COOLDOWN = 1500; // 1.5 seconds
 
 // Combat Constants
 const PLAYER_SHOOT_COOLDOWN = 80;
-const ENEMY_SHOOT_COOLDOWN = 1200;
 const MELEE_RANGE = 40;
 const MELEE_COOLDOWN = 500;
 const MELEE_KNOCKBACK_FORCE = 350;
 const STUN_DURATION = 1000;
+
+// NEW: Enemy-specific constants
+const BASE_ENEMY_SHOOT_COOLDOWN = 800; // Default shoot cooldown
+
+const MELEE_ENEMY_ATTACK_RANGE = 40; // How close to attack
+const MELEE_ENEMY_COOLDOWN = 1000; // 1 second between attacks
+const MELEE_ENEMY_DAMAGE = 10;
+
+const SHOOTER_ENEMY_SHOOT_COOLDOWN = 350; // Faster firing rate
+const SHOOTER_MIN_FLEE_DISTANCE = 150; // If player is closer than this, run away
+const SHOOTER_MAX_ENGAGE_DISTANCE = 400; // Will try to stay within this distance
 
 // ===================================================================
 // HELPER CLASSES (PLAYER AND ENEMY)
@@ -38,23 +48,19 @@ const STUN_DURATION = 1000;
  */
 class Player extends Phaser.Physics.Arcade.Sprite {
 
-    constructor(scene, x, y) {
-        super(scene, x, y, 'solid'); // Use 'solid' texture
-        this.setDisplaySize(20, 20); // Set the visual size
+    constructor(scene, x, y, keys) {
+        super(scene, x, y, 'solid');
+        this.setDisplaySize(20, 20);
 
         scene.add.existing(this);
         scene.physics.add.existing(this);
 
-        // --- Core Properties ---
         this.setCollideWorldBounds(true);
-        // this.body.setGravityY(GRAVITY);
-        this.setDragX(PLAYER_SPEED / (1 - FRICTION)); // Simulate friction with drag
-        this.body.setSize(1, 1); // Set correct hitbox size
+        this.setDragX(PLAYER_SPEED / (1 - FRICTION));
+        this.body.setSize(1, 1);
 
-        this.setTint(0xffff00); // <-- ADD THIS LINE
+        this.setTint(0xffff00);
 
-
-        // --- Custom State from Original Game ---
         this.health = 100;
         this.maxHealth = 100;
         this.currentWeapon = 'Machine Gun';
@@ -64,31 +70,28 @@ class Player extends Phaser.Physics.Arcade.Sprite {
         this.isInvincible = false;
         this.movementDirection = 'right';
 
-        // --- Timers ---
         this.lastDashReplenishTime = 0;
         this.lastShotTime = 0;
         this.lastMeleeTime = 0;
+
+        this.keys = keys;
     }
 
-    handleInput(keys) {
-        if (this.isDashing) return; // No movement input while dashing
+    handleInput() {
+        if (this.isDashing) return;
 
-        // Horizontal Movement
-        if (keys.A.isDown) {
+        if (this.keys.A.isDown) {
             this.setVelocityX(-PLAYER_SPEED);
             this.movementDirection = 'left';
-        } else if (keys.D.isDown) {
+        } else if (this.keys.D.isDown) {
             this.setVelocityX(PLAYER_SPEED);
             this.movementDirection = 'right';
-        } else {
-            // setVelocityX(0) would fight drag, so we let drag handle stopping
         }
 
-        // Jumping and Wall Jumping
         const onGround = this.body.blocked.down;
         const onWall = this.body.blocked.left || this.body.blocked.right;
 
-        if (Phaser.Input.Keyboard.JustDown(keys.W)) {
+        if (Phaser.Input.Keyboard.JustDown(this.keys.W)) {
             if (onGround) {
                 this.setVelocityY(-PLAYER_JUMP_POWER);
             } else if (onWall && this.wallJumpsRemaining > 0) {
@@ -109,14 +112,11 @@ class Player extends Phaser.Physics.Arcade.Sprite {
         this.body.setAllowGravity(false);
         this.setVelocity(this.movementDirection === 'right' ? DASH_SPEED : -DASH_SPEED, 0);
 
-        // End Dash Timer
         this.scene.time.delayedCall(DASH_DURATION, () => {
             this.isDashing = false;
             this.body.setAllowGravity(true);
-            // Don't reset velocity here, let drag take over for a smoother feel
         });
 
-        // End Invincibility Timer
         this.scene.time.delayedCall(DASH_INVINCIBILITY_DURATION, () => {
             this.isInvincible = false;
         });
@@ -126,7 +126,6 @@ class Player extends Phaser.Physics.Arcade.Sprite {
         const now = this.scene.time.now;
         if (now - this.lastShotTime < PLAYER_SHOOT_COOLDOWN) return;
         this.lastShotTime = now;
-
         this.scene.playerPellets.fire(this.x, this.y, targetX, targetY);
     }
     
@@ -134,13 +133,9 @@ class Player extends Phaser.Physics.Arcade.Sprite {
         const now = this.scene.time.now;
         if (now - this.lastMeleeTime < MELEE_COOLDOWN) return;
         this.lastMeleeTime = now;
-        
-        // Visual Effect
         this.scene.meleeManager.swing(this.x, this.y, this.movementDirection);
-
-        // Hit Detection
         this.scene.enemies.getChildren().forEach(enemy => {
-            if (!enemy.active) return; // Don't hit inactive enemies
+            if (!enemy.active) return;
             const distance = Phaser.Math.Distance.Between(this.x, this.y, enemy.x, enemy.y);
             if (distance < MELEE_RANGE && !enemy.isStunned) {
                 enemy.stunAndKnockback(this.x, this.y);
@@ -148,13 +143,17 @@ class Player extends Phaser.Physics.Arcade.Sprite {
         });
     }
 
-
     takeDamage(amount) {
         if (this.isInvincible) return;
-
         this.health -= amount;
-        // this.scene.cameras.main.shake(100, 0.01); // Screen shake on hit
-
+        // NEW: Add a flash effect on taking damage
+        this.scene.tweens.add({
+            targets: this,
+            alpha: 0.5,
+            duration: 100,
+            yoyo: true,
+            ease: 'Power1'
+        });
         if (this.health <= 0) {
             this.reset();
         }
@@ -169,32 +168,30 @@ class Player extends Phaser.Physics.Arcade.Sprite {
         this.lastDashReplenishTime = this.scene.time.now;
     }
     
-    // This is called automatically by the scene's update loop
     update(time, delta) {
+        if (Phaser.Input.Keyboard.JustUp(this.keys.W) && this.body.velocity.y < 0) {
+            this.setVelocityY(0);
+        }
+
         const onGround = this.body.blocked.down;
         const onWall = this.body.blocked.left || this.body.blocked.right;
 
-        // Reset jumps when on ground
         if (onGround) {
             this.wallJumpsRemaining = MAX_WALL_JUMPS;
         }
 
-        // Wall Sliding
         if (onWall && !onGround && this.body.velocity.y > 0) {
             this.setVelocityY(WALL_SLIDE_SPEED);
         }
 
-        // Dash replenishment
         if (this.dashesRemaining < MAX_DASHES && time > this.lastDashReplenishTime + DASH_REPLENISH_COOLDOWN) {
             this.dashesRemaining++;
             this.lastDashReplenishTime = time;
         }
 
-        // Visual State
-        this.setTint(0xffff00); // Default yellow
-        if (onWall) this.setTint(0xffff99); // Lighter yellow on wall
+        this.setTint(0xffff00);
+        if (onWall) this.setTint(0xffff99);
         if (this.isInvincible) {
-            // Flashing effect
             this.setVisible(Math.floor(time / 80) % 2 === 0);
         } else {
             this.setVisible(true);
@@ -202,47 +199,38 @@ class Player extends Phaser.Physics.Arcade.Sprite {
     }
 }
 
-
-/**
- * A class for Enemies. Similar structure to Player.
- */
-class Enemy extends Phaser.Physics.Arcade.Sprite {
-
-    constructor(scene, x, y) {
-        super(scene, x, y, 'solid'); // Use 'solid' texture
-        this.setDisplaySize(20, 20); // Set the visual size
+// NEW: BaseEnemy class to hold all shared enemy logic.
+class BaseEnemy extends Phaser.Physics.Arcade.Sprite {
+    constructor(scene, x, y, texture = 'solid') {
+        super(scene, x, y, texture);
+        this.setDisplaySize(30, 30);
 
         scene.add.existing(this);
         scene.physics.add.existing(this);
 
         this.setCollideWorldBounds(true);
-        // this.body.setGravityY(GRAVITY);
         this.body.setSize(1, 1);
         this.setDragX(PLAYER_SPEED / (1 - FRICTION));
-
-        this.setTint(0xff0000);
 
         this.health = 100;
         this.maxHealth = 100;
         this.speed = 150;
         this.jumpPower = 450;
-        this.wallJumpsRemaining = MAX_WALL_JUMPS;
         this.direction = 'left';
         this.isStunned = false;
-        
+
         this.lastShotTime = 0;
-        this.shootCooldown = ENEMY_SHOOT_COOLDOWN;
-        
-        // Add health bar graphics to the enemy itself
+        this.shootCooldown = BASE_ENEMY_SHOOT_COOLDOWN;
+
         this.healthBar = this.scene.add.graphics();
     }
-    
+
     stunAndKnockback(fromX, fromY) {
         this.isStunned = true;
         
         const angle = Phaser.Math.Angle.Between(fromX, fromY, this.x, this.y);
         const knockbackVel = this.scene.physics.velocityFromRotation(angle, MELEE_KNOCKBACK_FORCE);
-        this.setVelocity(knockbackVel.x, knockbackVel.y - 100); // Add a little upward pop
+        this.setVelocity(knockbackVel.x, knockbackVel.y - 100);
 
         this.scene.time.delayedCall(STUN_DURATION, () => {
             this.isStunned = false;
@@ -252,17 +240,25 @@ class Enemy extends Phaser.Physics.Arcade.Sprite {
     takeDamage(amount) {
         this.health -= amount;
         if (this.health <= 0) {
-            this.healthBar.destroy(); // Clean up the graphics object
-            this.destroy(); // Remove from game
+            this.healthBar.destroy();
+            this.destroy();
         }
     }
 
-    // This is called automatically by the group's update loop
-    update(time, delta) {
-        if (!this.active) { // <-- ADD THIS CHECK
-            return;
+    shootAtPlayer(time) {
+        const player = this.scene.player;
+        if (!player.active || !player.body) return;
+        
+        if (time > this.lastShotTime + this.shootCooldown) {
+            this.lastShotTime = time;
+            this.scene.enemyPellets.fire(this.x, this.y, player.x, player.y);
         }
-        // Update health bar position
+    }
+    
+    update(time, delta) {
+        if (!this.active) return;
+
+        // Health bar logic
         const barWidth = 30;
         const barHeight = 5;
         const barX = this.x - barWidth / 2;
@@ -274,58 +270,91 @@ class Enemy extends Phaser.Physics.Arcade.Sprite {
             .fillStyle(0x00ff00)
             .fillRect(barX, barY, barWidth * healthPercentage, barHeight);
             
+        // Stun logic
         if (this.isStunned) {
-            this.setTint(0x800080); // Purple when stunned
+            this.setTint(0x800080);
             return;
         }
 
-        // Reset tint
-        this.setTint(0xff0000); // Default red
-        const onWall = this.body.blocked.left || this.body.blocked.right;
-        if(onWall) this.setTint(0xff9999); // Lighter red on wall
+        // Delegate specific behavior to subclasses
+        this.updateAI(time, delta);
 
-        const onGround = this.body.blocked.down;
-        if (onGround) {
-            this.wallJumpsRemaining = MAX_WALL_JUMPS;
+        // Common logic: fall off map
+        if (this.y > this.scene.sys.game.config.height + 50) {
+             this.setPosition(425, 140);
+             this.setVelocity(0,0);
+             this.health = this.maxHealth;
         }
+    }
 
-        // --- Basic AI ---
+    // This method will be overridden by child classes
+    updateAI(time, delta) {
+        // To be implemented by subclasses
+    }
+}
+
+// NEW: Melee-focused enemy
+class MeleeEnemy extends BaseEnemy {
+    constructor(scene, x, y) {
+        super(scene, x, y);
+        this.setTint(0xff0000); // Red for melee
+        this.speed = 150;
+        this.lastMeleeTime = 0;
+        this.health = 150;
+        this.maxHealth = 150;
+    }
+
+    performMelee(player, time) {
+        this.lastMeleeTime = time;
+        player.takeDamage(MELEE_ENEMY_DAMAGE);
+        this.scene.tweens.add({ // Visual feedback for attack
+            targets: this,
+            scaleX: 1.2,
+            scaleY: 1.2,
+            duration: 100,
+            yoyo: true,
+            ease: 'Power1'
+        });
+    }
+
+    updateAI(time, delta) {
+        this.setTint(0xff0000); // Reset tint
         const player = this.scene.player;
-        if (!player.active) return; // Don't run AI if player is inactive
+        if (!player.active) return;
         
         const horizontalDist = player.x - this.x;
         const verticalDist = player.y - this.y;
         const distance = Phaser.Math.Distance.Between(this.x, this.y, player.x, player.y);
 
-        const ATTACK_RANGE = 300;
+        const AGGRO_RANGE = 300;
 
-        // 1. Movement
-        if (distance < ATTACK_RANGE && distance > this.width) {
-            if (horizontalDist > 0) {
+        // 1. Attack
+        if (distance < MELEE_ENEMY_ATTACK_RANGE && time > this.lastMeleeTime + MELEE_ENEMY_COOLDOWN) {
+            this.performMelee(player, time);
+        }
+
+        // 2. Movement
+        if (distance < AGGRO_RANGE && distance > MELEE_ENEMY_ATTACK_RANGE - 5) {
+             if (horizontalDist > 0) {
                 this.setVelocityX(this.speed);
                 this.direction = 'right';
             } else {
                 this.setVelocityX(-this.speed);
                 this.direction = 'left';
             }
+        } else {
+            // Stop if too close or out of range
+            this.setVelocityX(0);
         }
 
-        // 2. Shooting
-        if (distance < ATTACK_RANGE * 1.5 && time > this.lastShotTime + this.shootCooldown) {
-            this.lastShotTime = time;
-            this.scene.enemyPellets.fire(this.x, this.y, player.x, player.y);
-        }
-        
-        // 3. Jumping
-        const JUMP_DECISION_THRESHOLD = -this.height * 2;
-        if (onGround && verticalDist < JUMP_DECISION_THRESHOLD) {
+        // 3. Jumping (original AI jumping logic)
+        const onGround = this.body.blocked.down;
+        if (onGround && verticalDist < -this.height * 2) {
             this.setVelocityY(-this.jumpPower);
         }
         
-        // Check for walls in the way and jump over them
         if (onGround && Math.abs(horizontalDist) > this.width) {
             const lookAheadX = this.x + (this.direction === 'right' ? this.width : -this.width);
-            // This is a simplified check, a better way would be raycasting or checking a small box
             const wallInFront = this.scene.platforms.getChildren().some(p => 
                  p.body.hitTest(lookAheadX, this.y) && p.body.height > this.height
             );
@@ -333,11 +362,65 @@ class Enemy extends Phaser.Physics.Arcade.Sprite {
                 this.setVelocityY(-this.jumpPower);
             }
         }
+    }
+}
+
+// NEW: Ranged enemy that tries to keep its distance
+class ShooterEnemy extends BaseEnemy {
+    constructor(scene, x, y) {
+        super(scene, x, y);
+        this.setTint(0x32a852); // Green for shooter
+        this.speed = 100; // Slower, more deliberate
+        this.shootCooldown = SHOOTER_ENEMY_SHOOT_COOLDOWN; // Use the faster cooldown
+    }
+
+    hasLineOfSight(target) {
+        const lineOfSight = new Phaser.Geom.Line(this.x, this.y, target.x, target.y);
+        const platforms = this.scene.platforms.getChildren();
         
-        if (this.y > this.scene.sys.game.config.height + 50) {
-             this.setPosition(425, 140);
-             this.setVelocity(0,0);
-             this.health = this.maxHealth;
+        for (let i = 0; i < platforms.length; i++) {
+            const plat = platforms[i];
+            const platBounds = plat.getBounds();
+            if (Phaser.Geom.Intersects.LineToRectangle(lineOfSight, platBounds)) {
+                return false; // Obstacle detected
+            }
+        }
+        return true; // Clear shot
+    }
+
+    updateAI(time, delta) {
+        this.setTint(0x32a852); // Reset tint
+        const player = this.scene.player;
+        if (!player.active) return;
+        
+        const distance = Phaser.Math.Distance.Between(this.x, this.y, player.x, player.y);
+        const hasLOS = this.hasLineOfSight(player);
+
+        if (hasLOS) {
+            this.shootAtPlayer(time); // Always shoot if LOS is clear
+
+            if (distance < SHOOTER_MIN_FLEE_DISTANCE) {
+                // Flee: Player is too close, move away horizontally
+                if (player.x < this.x) this.setVelocityX(this.speed);
+                else this.setVelocityX(-this.speed);
+            } else if (distance > SHOOTER_MAX_ENGAGE_DISTANCE) {
+                // Advance: Player is too far, move closer
+                if (player.x > this.x) this.setVelocityX(this.speed);
+                else this.setVelocityX(-this.speed);
+            } else {
+                // Optimal range: Stop moving to improve aim
+                this.setVelocityX(0);
+            }
+        } else {
+            // No LOS: Move towards player's X to try and find an angle
+            if (player.x > this.x) this.setVelocityX(this.speed * 0.75);
+            else this.setVelocityX(-this.speed * 0.75);
+        }
+
+        // Simple jump logic to get unstuck
+        const onGround = this.body.blocked.down;
+        if (onGround && (this.body.blocked.left || this.body.blocked.right)) {
+            this.setVelocityY(-this.jumpPower);
         }
     }
 }
@@ -347,112 +430,75 @@ class Enemy extends Phaser.Physics.Arcade.Sprite {
 // PROJECTILE CLASSES
 // ===================================================================
 
-/**
- * A group to manage all player pellets.
- */
 class PlayerPelletGroup extends Phaser.Physics.Arcade.Group {
     constructor(scene) {
         super(scene.physics.world, scene);
-
-        this.createMultiple({
-            classType: PlayerPellet,
-            frameQuantity: 30, // Pre-allocate 30 pellets
-            active: false,
-            visible: false,
-            key: 'solid'
-        });
+        this.classType = PlayerPellet;
     }
-
     fire(x, y, targetX, targetY) {
-        const pellet = this.getFirstDead(true);
+        const pellet = this.create(x, y, 'solid');
         if (pellet) {
             pellet.fire(x, y, targetX, targetY);
         }
     }
 }
-
 class PlayerPellet extends Phaser.Physics.Arcade.Sprite {
     constructor(scene, x, y) {
         super(scene, x, y, 'solid');
     }
-
     fire(x, y, targetX, targetY) {
-        this.body.reset(x, y);
         this.setActive(true);
         this.setVisible(true);
         this.body.setAllowGravity(false);
-        this.setScale(8, 2); // Make it look like a line
+        this.setScale(8, 2);
         this.setTint(0x000000);
         
         const angle = Phaser.Math.Angle.Between(x, y, targetX, targetY);
         this.setRotation(angle);
-
-        this.scene.physics.velocityFromRotation(angle, 420, this.body.velocity); // 420 is speed (7 * 60fps)
-
-        // Deactivate after some time to clean up
+        this.scene.physics.velocityFromRotation(angle, 420, this.body.velocity);
         this.lifespan = 2000;
     }
-    
     preUpdate(time, delta) {
         super.preUpdate(time, delta);
         this.lifespan -= delta;
         if (this.lifespan <= 0) {
-            this.setActive(false);
-            this.setVisible(false);
+            this.destroy();
         }
     }
 }
-
-/**
- * A group to manage all enemy pellets.
- */
 class EnemyPelletGroup extends Phaser.Physics.Arcade.Group {
     constructor(scene) {
         super(scene.physics.world, scene);
-
-        this.createMultiple({
-            classType: EnemyPellet,
-            frameQuantity: 30,
-            active: false,
-            visible: false,
-            key: 'solid'
-        });
+        this.classType = EnemyPellet;
     }
-
     fire(x, y, targetX, targetY) {
-        const pellet = this.getFirstDead(true);
+        const pellet = this.create(x, y, 'solid');
         if (pellet) {
             pellet.fire(x, y, targetX, targetY);
         }
     }
 }
-
 class EnemyPellet extends Phaser.Physics.Arcade.Sprite {
     constructor(scene, x, y) {
         super(scene, x, y, 'solid');
     }
-
     fire(x, y, targetX, targetY) {
-        this.body.reset(x, y);
         this.setActive(true);
         this.setVisible(true);
         this.body.setAllowGravity(false);
-        this.body.setCircle(1); // Circular hitbox
+        this.body.setCircle(1);
         this.setDisplaySize(10, 10);
         this.setTint(0xf58742);
 
         const angle = Phaser.Math.Angle.Between(x, y, targetX, targetY);
-        this.scene.physics.velocityFromRotation(angle, 240, this.body.velocity); // 240 speed (4 * 60fps)
-
+        this.scene.physics.velocityFromRotation(angle, 240, this.body.velocity);
         this.lifespan = 3000;
     }
-    
     preUpdate(time, delta) {
         super.preUpdate(time, delta);
         this.lifespan -= delta;
         if (this.lifespan <= 0) {
-            this.setActive(false);
-            this.setVisible(false);
+            this.destroy();
         }
     }
 }
@@ -465,7 +511,6 @@ class MeleeManager {
         this.scene = scene;
         this.graphics = scene.add.graphics();
     }
-
     swing(x, y, direction) {
         this.graphics.clear();
         this.graphics.lineStyle(3, 0xFFFFFF, 0.8);
@@ -485,7 +530,6 @@ class MeleeManager {
         this.graphics.arc(x, y, radius, startAngle, endAngle, false);
         this.graphics.strokePath();
 
-        // Clear the graphic after a short time
         this.scene.time.delayedCall(150, () => {
             this.graphics.clear();
         });
@@ -507,11 +551,9 @@ class GameUI {
         const hudY = margin;
         const padding = 10;
 
-        // Create a container to hold all UI elements
         this.container = scene.add.container(hudX, hudY);
-        this.container.setScrollFactor(0); // Make it stay in place
+        this.container.setScrollFactor(0);
 
-        // Background
         const bg = scene.add.graphics();
         bg.fillStyle(0x000000, 0.4);
         bg.fillRect(0, 0, hudWidth, hudHeight);
@@ -521,33 +563,28 @@ class GameUI {
         
         const textStyle = { font: "14px 'Courier New'", fill: '#fff' };
 
-        // Health
         this.healthLabel = scene.add.text(padding, padding + 13, 'Health', textStyle).setOrigin(0, 0.5);
         this.healthBarBg = scene.add.graphics();
         this.healthBar = scene.add.graphics();
         this.container.add([this.healthLabel, this.healthBarBg, this.healthBar]);
 
-        // Other Text
         this.weaponText = scene.add.text(padding, 50, '', textStyle);
         this.jumpsText = scene.add.text(padding, 70, '', textStyle);
         this.dashesLabel = scene.add.text(padding, 90, 'Dashes:', textStyle);
         this.container.add([this.weaponText, this.jumpsText, this.dashesLabel]);
         
-        // Dash indicators
         this.dashBoxes = [];
         const dashBoxSize = 12;
-        const dashBoxSpacing = 5;
         for (let i = 0; i < MAX_DASHES; i++) {
             const box = scene.add.graphics();
             this.container.add(box);
             this.dashBoxes.push(box);
         }
     }
-    
     update() {
         const player = this.scene.player;
+        if (!player.body) return;
         
-        // Health bar update
         const barWidth = 120;
         const barHeight = 15;
         const barX = 80;
@@ -556,11 +593,9 @@ class GameUI {
         const healthPercentage = Phaser.Math.Clamp(player.health / player.maxHealth, 0, 1);
         this.healthBar.clear().fillStyle(0x2ecc71).fillRect(barX, barY, barWidth * healthPercentage, barHeight);
         
-        // Text update
         this.weaponText.setText(`Weapon: ${player.currentWeapon}`);
         this.jumpsText.setText(`Jumps: ${player.wallJumpsRemaining}`);
 
-        // Dashes update
         const dashBoxSize = 12;
         const dashBoxSpacing = 5;
         this.dashBoxes.forEach((box, i) => {
@@ -580,36 +615,24 @@ class GameUI {
 // ===================================================================
 // MAIN GAME SCENE
 // ===================================================================
-
 class GameScene extends Phaser.Scene {
     constructor() {
         super({ key: 'GameScene' });
     }
 
-    /**
-     * Load assets here.
-     */
     preload() {
-        // Create a 1x1 white texture that we can tint and scale
         const canvas = this.textures.createCanvas('solid', 1, 1);
         const ctx = canvas.getContext('2d');
-        ctx.fillStyle = '#ffffff'; // Fill with white
+        ctx.fillStyle = '#ffffff';
         ctx.fillRect(0, 0, 1, 1);
-        
-        // Crucially, tell Phaser to update the texture in the GPU
         canvas.refresh();
     }
 
-
-    /**
-     * Create game objects here.
-     */
     create() {
         this.cameras.main.setBackgroundColor('#87ceeb');
         
-        // --- Setup Input ---
-        this.keys = this.input.keyboard.addKeys('W,A,D,E,SHIFT');
-        this.input.mouse.disableContextMenu(); // Prevent right-click menu
+        this.keys = this.input.keyboard.addKeys('W,A,S,D,E,SHIFT');
+        this.input.mouse.disableContextMenu();
 
         const platformData = [
             { x: 0, y: 340, width: 640, height: 20 }, { x: 100, y: 280, width: 100, height: 10 },
@@ -617,94 +640,74 @@ class GameScene extends Phaser.Scene {
             { x: 500, y: 200, width: 20, height: 140 }, { x: 0, y: 100, width: 20, height: 240 },
         ];
         
-        // We use a STATIC group to ensure all platforms are immovable and stable.
         this.platforms = this.physics.add.staticGroup();
         
         platformData.forEach(p => {
-            // By default, physics bodies are positioned by their center.
-            // We add half the width/height to the top-left coordinates to position them correctly.
             const plat = this.platforms.create(p.x + p.width / 2, p.y + p.height / 2, 'solid');
+            plat.setDisplaySize(p.width, p.height).setTint(0x654321).refreshBody();
+        });
         
-            // Now, we set the visual size and apply it to the physics hitbox.
-            plat.setDisplaySize(p.width, p.height)
-                .setTint(0x654321)
-                .refreshBody(); // CRITICAL: This syncs the physics body to the new display size.
-        });
-        // --- Create Player ---
-        this.player = new Player(this, 50, 200);
+        this.player = new Player(this, 50, 200, this.keys);
 
-        // --- Create Enemies ---
+        // MODIFIED: Use a group that runs the update loop on its children
         this.enemies = this.add.group({
-            classType: Enemy,
-            runChildUpdate: true // This is crucial for their AI to run!
+            classType: BaseEnemy, // Set a base class if needed, though we add specific ones
+            runChildUpdate: true  // This is crucial! It calls the update method on each enemy.
         });
-        this.enemies.add(new Enemy(this, 425, 140));
 
-        // --- Create Projectile Groups ---
+        // MODIFIED: Add one of each new enemy type
+        this.enemies.add(new MeleeEnemy(this, 425, 140));
+        this.enemies.add(new ShooterEnemy(this, 550, 100));
+
         this.playerPellets = new PlayerPelletGroup(this);
         this.enemyPellets = new EnemyPelletGroup(this);
         
-        // --- Create Managers ---
         this.meleeManager = new MeleeManager(this);
         this.ui = new GameUI(this);
 
-        // --- Setup Collisions ---
         this.physics.add.collider(this.player, this.platforms);
         this.physics.add.collider(this.enemies, this.platforms);
 
         this.physics.add.overlap(this.playerPellets, this.enemies, this.handlePlayerPelletHitEnemy, null, this);
-        this.physics.add.collider(this.playerPellets, this.platforms, (pellet) => pellet.setActive(false).setVisible(false));
+        this.physics.add.collider(this.playerPellets, this.platforms, (pellet) => pellet.destroy());
 
         this.physics.add.overlap(this.enemyPellets, this.player, this.handleEnemyPelletHitPlayer, null, this);
-        this.physics.add.collider(this.enemyPellets, this.platforms, (pellet) => pellet.setActive(false).setVisible(false));
+        this.physics.add.collider(this.enemyPellets, this.platforms, (pellet) => pellet.destroy());
         
-        // --- Cursor ---
         this.cursor = this.add.graphics();
     }
     
-    // --- Collision Callbacks ---
-    
-    // CORRECTED: This is a Group vs. Group collision, so the arguments are (memberOfFirstGroup, memberOfSecondGroup)
     handlePlayerPelletHitEnemy(enemy, pellet) {
-        pellet.setActive(false).setVisible(false);
+        pellet.destroy();
         enemy.takeDamage(10);
     }
     
-    // CORRECTED: This is a Group vs. Sprite collision, so the arguments are (sprite, memberOfGroup)
     handleEnemyPelletHitPlayer(player, pellet) {
-        console.log(typeof pellet);
-        console.log(typeof player);
-        pellet.setActive(false).setVisible(false);
+        pellet.destroy();
         player.takeDamage(5);
     }
 
-    /**
-     * The main game loop, called every frame.
-     */
     update(time, delta) {
-        // Player update (input and other logic)
-        this.player.handleInput(this.keys);
+        // Player update is called manually
+        this.player.handleInput();
         this.player.update(time, delta);
         
         if(this.player.y > this.sys.game.config.height + 50) {
             this.player.reset();
         }
 
-        // --- Handle player actions ---
         if (this.input.activePointer.isDown) {
             this.player.shoot(this.input.activePointer.x, this.input.activePointer.y);
         }
-        if (Phaser.Input.Keyboard.JustDown(this.keys.E)) {
+        if (Phaser.Input.Keyboard.JustDown(this.keys.S)) {
             this.player.performMelee();
         }
         if (Phaser.Input.Keyboard.JustDown(this.keys.SHIFT)) {
             this.player.performDash();
         }
         
-        // Update UI
         this.ui.update();
         
-        // Draw custom cursor
         const pointer = this.input.activePointer;
         const cursorSize = 10;
         this.cursor.clear()
@@ -716,7 +719,6 @@ class GameScene extends Phaser.Scene {
             .strokePath();
     }
 }
-
 // ===================================================================
 // PHASER GAME CONFIGURATION
 // ===================================================================
@@ -725,17 +727,16 @@ const config = {
     type: Phaser.AUTO,
     width: 640,
     height: 360,
-    parent: 'game-container', // This should match a div id in your HTML if you use one
+    parent: 'game-container',
     pixelArt: true,
     physics: {
         default: 'arcade',
         arcade: {
             gravity: { y: GRAVITY },
-            debug: true // Set to true to see physics bodies
+            debug: true
         }
     },
     scene: [GameScene]
 };
 
-// Start the game
 const game = new Phaser.Game(config);
