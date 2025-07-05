@@ -108,16 +108,31 @@ class Player extends Phaser.Physics.Arcade.Sprite {
 		this.lastShotTime = now;
 		this.scene.playerPellets.fire(this.x, this.y, targetX, targetY);
 	}
-	performMelee() {
+	// MODIFIED: `performMelee` now takes target coordinates and checks direction.
+	performMelee(targetX, targetY) {
 		const now = this.scene.time.now;
 		if (now - this.lastMeleeTime < MELEE_COOLDOWN) return;
 		this.lastMeleeTime = now;
-		this.scene.meleeManager.swing(this.x, this.y, this.movementDirection);
+
+		// Calculate the angle towards the mouse cursor
+		const angleToCursor = Phaser.Math.Angle.Between(this.x, this.y, targetX, targetY);
+		this.scene.meleeManager.swing(this.x, this.y, angleToCursor);
+
+		// Check for enemies within the melee arc
 		this.scene.enemies.getChildren().forEach(enemy => {
-			if (!enemy.active) return;
+			if (!enemy.active || enemy.isStunned) return;
+
 			const distance = Phaser.Math.Distance.Between(this.x, this.y, enemy.x, enemy.y);
-			if (distance < MELEE_RANGE && !enemy.isStunned) {
-				enemy.stunAndKnockback(this.x, this.y);
+
+			// 1. Is the enemy within melee range?
+			if (distance < MELEE_RANGE) {
+				const angleToEnemy = Phaser.Math.Angle.Between(this.x, this.y, enemy.x, enemy.y);
+				// 2. Is the angle to the enemy within our 90-degree swing arc?
+				const angleDifference = Math.abs(Phaser.Math.Angle.Wrap(angleToEnemy - angleToCursor));
+
+				if (angleDifference <= Phaser.Math.DegToRad(45)) { // 45 degrees on either side of the center line
+					enemy.stunAndKnockback(this.x, this.y);
+				}
 			}
 		});
 	}
@@ -169,7 +184,6 @@ class Player extends Phaser.Physics.Arcade.Sprite {
 	}
 }
 
-// MODIFIED: BaseEnemy class to hold all shared enemy logic, including wall jumps.
 class BaseEnemy extends Phaser.Physics.Arcade.Sprite {
 	constructor(scene, x, y, texture = 'solid') {
 		super(scene, x, y, texture);
@@ -228,13 +242,8 @@ class BaseEnemy extends Phaser.Physics.Arcade.Sprite {
 
 		if (time > this.lastShotTime + this.shootCooldown) {
 			this.lastShotTime = time;
-
-			// --- THE FIX IS HERE ---
-			// We spawn the pellet from this.y - 10, which is 10 pixels ABOVE the enemy's center.
-			// This ensures it clears the ground the enemy is standing on.
 			const spawnY = this.y - 10;
 			this.scene.enemyPellets.fire(this.x, spawnY, player.x, player.y);
-			// --- END FIX ---
 		}
 	}
 
@@ -281,8 +290,6 @@ class MeleeEnemy extends BaseEnemy {
 		this.lastMeleeTime = 0;
 		this.health = 150;
 		this.maxHealth = 150;
-
-		// NEW: State to track if the player has been spotted.
 		this.hasSpottedPlayer = false;
 	}
 
@@ -300,8 +307,7 @@ class MeleeEnemy extends BaseEnemy {
 	}
 
 	updateAI(time, delta) {
-		// NEW: Tint changes based on agro status
-		this.setTint(this.hasSpottedPlayer ? 0xFF4500 : 0xff0000); // Normal red, but orange-red when agro'd
+		this.setTint(this.hasSpottedPlayer ? 0xFF4500 : 0xff0000);
 
 		const player = this.scene.player;
 		if (!player.active) return;
@@ -314,15 +320,11 @@ class MeleeEnemy extends BaseEnemy {
 		const onGround = this.body.blocked.down;
 		const playerIsAbove = player.y < this.y - this.height;
 
-		// --- NEW: Relentless Agro Logic ---
-		// 1. If we haven't spotted the player yet, check if they are in initial range.
 		if (!this.hasSpottedPlayer && distance < MELEE_ENEMY_INITIAL_AGGRO_RANGE) {
 			this.hasSpottedPlayer = true;
 		}
 
-		// 2. Once spotted, ALWAYS chase, ignoring the initial range.
 		if (this.hasSpottedPlayer) {
-			// Movement logic: still stops when it gets in attack range
 			if (distance > MELEE_ENEMY_ATTACK_RANGE - 5) {
 				if (horizontalDist > 0) {
 					this.setVelocityX(this.speed);
@@ -332,17 +334,14 @@ class MeleeEnemy extends BaseEnemy {
 					this.direction = 'left';
 				}
 			} else {
-				this.setVelocityX(0); // Stop when close enough to attack
+				this.setVelocityX(0);
 			}
 		}
-		// --- END NEW ---
 
-		// Attack logic (remains the same)
 		if (distance < MELEE_ENEMY_ATTACK_RANGE && time > this.lastMeleeTime + MELEE_ENEMY_COOLDOWN) {
 			this.performMelee(player, time);
 		}
 
-		// Navigation logic (remains the same)
 		if (onWall && !onGround && playerIsAbove) {
 			this.performWallJump();
 			return;
@@ -367,8 +366,7 @@ class MeleeEnemy extends BaseEnemy {
 class ShooterEnemy extends BaseEnemy {
 	constructor(scene, x, y) {
 		super(scene, x, y);
-		this.setTint(0x32a852); // Green for shooter
-		// MODIFIED: Increased speed from 100 to 140
+		this.setTint(0x32a852);
 		this.speed = 140;
 		this.shootCooldown = SHOOTER_ENEMY_SHOOT_COOLDOWN;
 	}
@@ -381,14 +379,14 @@ class ShooterEnemy extends BaseEnemy {
 			const plat = platforms[i];
 			const platBounds = plat.getBounds();
 			if (Phaser.Geom.Intersects.LineToRectangle(lineOfSight, platBounds)) {
-				return false; // Obstacle detected
+				return false;
 			}
 		}
-		return true; // Clear shot
+		return true;
 	}
 
 	updateAI(time, delta) {
-		this.setTint(0x32a852); // Reset tint
+		this.setTint(0x32a852);
 		const player = this.scene.player;
 		if (!player.active) return;
 
@@ -427,7 +425,7 @@ class ShooterEnemy extends BaseEnemy {
 
 
 // ===================================================================
-// PROJECTILE & OTHER CLASSES (Unchanged from previous version)
+// PROJECTILE & OTHER CLASSES
 // ===================================================================
 
 class PlayerPelletGroup extends Phaser.Physics.Arcade.Group {
@@ -505,21 +503,21 @@ class MeleeManager {
 		this.scene = scene;
 		this.graphics = scene.add.graphics();
 	}
-	swing(x, y, direction) {
+	// MODIFIED: `swing` now takes an angle instead of a direction
+	swing(x, y, angle) {
 		this.graphics.clear();
 		this.graphics.lineStyle(3, 0xFFFFFF, 0.8);
 		const radius = MELEE_RANGE;
-		let startAngle, endAngle;
-		if (direction === 'right') {
-			startAngle = Phaser.Math.DegToRad(-45);
-			endAngle = Phaser.Math.DegToRad(45);
-		} else {
-			startAngle = Phaser.Math.DegToRad(135);
-			endAngle = Phaser.Math.DegToRad(225);
-		}
+
+		// A 90-degree swing arc, centered on the provided angle
+		const swingArcWidth = Phaser.Math.DegToRad(90);
+		const startAngle = angle - swingArcWidth / 2;
+		const endAngle = angle + swingArcWidth / 2;
+
 		this.graphics.beginPath();
 		this.graphics.arc(x, y, radius, startAngle, endAngle, false);
 		this.graphics.strokePath();
+
 		this.scene.time.delayedCall(150, () => {
 			this.graphics.clear();
 		});
@@ -586,7 +584,7 @@ class GameUI {
 }
 
 // ===================================================================
-// MAIN GAME SCENE & CONFIG (Unchanged from previous version)
+// MAIN GAME SCENE & CONFIG
 // ===================================================================
 
 class GameScene extends Phaser.Scene {
@@ -604,7 +602,8 @@ class GameScene extends Phaser.Scene {
 	}
 	create() {
 		this.cameras.main.setBackgroundColor('#87ceeb');
-		this.keys = this.input.keyboard.addKeys('W,A,S,D,E,SHIFT');
+		// MODIFIED: Removed 'S' key as it's no longer used for melee
+		this.keys = this.input.keyboard.addKeys('W,A,D,E,SHIFT');
 		this.input.mouse.disableContextMenu();
 		const platformData = [
 			// --- Boundaries ---
@@ -756,45 +755,45 @@ class GameScene extends Phaser.Scene {
 		const meleeSpawns = [{
 				x: 1400,
 				y: 900
-			}, // Bottom right
+			},
 			{
 				x: 700,
 				y: 900
-			}, // Bottom center pit
+			},
 			{
 				x: 100,
 				y: 700
-			}, // Left mid-platform
+			},
 			{
 				x: 750,
 				y: 600
-			}, // Top of center structure
+			},
 			{
 				x: 1400,
 				y: 350
-			}, // High right platform
+			},
 		];
 
 		const shooterSpawns = [{
 				x: 750,
 				y: 200
-			}, // Center top
+			},
 			{
 				x: 1400,
 				y: 100
-			}, // Very top right corner
+			},
 			{
 				x: 80,
 				y: 250
-			}, // High left platform
+			},
 			{
 				x: 1250,
 				y: 750
-			}, // Guarding bottom right area
+			},
 			{
 				x: 200,
 				y: 500
-			}, // On the left mid-platform
+			},
 		];
 
 		meleeSpawns.forEach(spawn => {
@@ -814,6 +813,15 @@ class GameScene extends Phaser.Scene {
 		this.physics.add.collider(this.playerPellets, this.platforms, (pellet) => pellet.destroy());
 		this.physics.add.overlap(this.enemyPellets, this.player, this.handleEnemyPelletHitPlayer, null, this);
 		this.physics.add.collider(this.enemyPellets, this.platforms, (pellet) => pellet.destroy());
+
+		// MODIFIED: Add a listener for mouse clicks to handle melee
+		this.input.on('pointerdown', (pointer) => {
+			// Check if the middle mouse button was clicked
+			if (pointer.middleButtonDown()) {
+				this.player.performMelee(pointer.x, pointer.y);
+			}
+		});
+
 		this.cursor = this.add.graphics();
 	}
 	handlePlayerPelletHitEnemy(enemy, pellet) {
@@ -830,12 +838,14 @@ class GameScene extends Phaser.Scene {
 		if (this.player.y > this.sys.game.config.height + 50) {
 			this.player.reset();
 		}
-		if (this.input.activePointer.isDown) {
+		// MODIFIED: Check for left button specifically, to avoid shooting on middle click
+		if (this.input.activePointer.isDown && this.input.activePointer.leftButtonDown()) {
 			this.player.shoot(this.input.activePointer.x, this.input.activePointer.y);
 		}
-		if (Phaser.Input.Keyboard.JustDown(this.keys.S)) {
-			this.player.performMelee();
-		}
+
+		// MODIFIED: Removed the 'S' key check for melee, it's now handled by the 'pointerdown' event
+		// if (Phaser.Input.Keyboard.JustDown(this.keys.S)) { ... }
+
 		if (Phaser.Input.Keyboard.JustDown(this.keys.SHIFT)) {
 			this.player.performDash();
 		}
@@ -857,7 +867,7 @@ const config = {
 			gravity: {
 				y: GRAVITY
 			},
-			debug: true
+			debug: false
 		}
 	},
 	scene: [GameScene]
