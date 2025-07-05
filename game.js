@@ -22,12 +22,12 @@ const DASH_REPLENISH_COOLDOWN = 1500; // 1.5 seconds
 
 // Combat Constants
 const PLAYER_SHOOT_COOLDOWN = 80;
-const MELEE_RANGE = 150;
+const MELEE_RANGE = 300;
 const MELEE_COOLDOWN = 400;
-const MELEE_KNOCKBACK_FORCE = 1000;
+const MELEE_KNOCKBACK_FORCE = 2000;
 const MELEE_ANIMATION_DURATION = 180;
 const STUN_DURATION = 1000;
-const SLASH_WIDTH = 90;  // The length of the slash arc.
+const SLASH_WIDTH = 300;  // The length of the slash arc.
 const SLASH_CURVE = 90;   // How much the slash curves. Higher number = bigger arc.
 const SLASH_OFFSET =50;  // NEW: How far from the player's center the slash appears.
 
@@ -490,92 +490,40 @@ class MeleeManager {
 		this.scene = scene;
 		this.textureKey = 'melee_slash_texture';
 
-		console.log('[MeleeManager] Initializing...');
-
-		// Check if texture already exists (e.g., from a hot-reload in development)
-		if (this.scene.textures.exists(this.textureKey)) {
-			console.log('[MeleeManager] Texture already exists. Skipping creation.');
-			return;
+		if (!this.scene.textures.exists(this.textureKey)) {
+			this.createSlashTexture();
 		}
-
-		this.createSlashTexture();
 	}
 
 	createSlashTexture() {
-		try {
-			const graphics = this.scene.add.graphics();
-			const curve = new Phaser.Curves.QuadraticBezier(
-				new Phaser.Math.Vector2(0, SLASH_CURVE),
-				new Phaser.Math.Vector2(SLASH_WIDTH / 2, 0),
-				new Phaser.Math.Vector2(SLASH_WIDTH, SLASH_CURVE)
-			);
-			
-			// Let's simplify the texture height calculation.
-			// The curve starts at y=SLASH_CURVE and dips to y=0, so the height is just SLASH_CURVE.
-			// We will draw it at the top of the graphics object.
-			
-			for (let i = 0; i < 7; i++) {
-				graphics.lineStyle(18 - (i * 2.5), 0xffffff, 1.0 - (i * 0.15));
-				curve.draw(graphics);
-			}
-
-			graphics.generateTexture(this.textureKey, SLASH_WIDTH, SLASH_CURVE);
-			graphics.destroy();
-			
-			// DEBUG: Confirm the texture was created and is valid.
-			const texture = this.scene.textures.get(this.textureKey);
-			console.log(`[MeleeManager] Texture created successfully! Key: "${this.textureKey}", Size: ${texture.width}x${texture.height}`);
-
-		} catch (e) {
-			console.error('[MeleeManager] FATAL ERROR during texture creation:', e);
+		const graphics = this.scene.add.graphics();
+		const curve = new Phaser.Curves.QuadraticBezier(
+			new Phaser.Math.Vector2(0, SLASH_CURVE),
+			new Phaser.Math.Vector2(SLASH_WIDTH / 2, 0),
+			new Phaser.Math.Vector2(SLASH_WIDTH, SLASH_CURVE)
+		);
+		for (let i = 0; i < 7; i++) {
+			graphics.lineStyle(18 - (i * 2.5), 0xffffff, 1.0 - (i * 0.15));
+			curve.draw(graphics);
 		}
+		graphics.generateTexture(this.textureKey, SLASH_WIDTH, SLASH_CURVE);
+		graphics.destroy();
 	}
 
 	swing(player, targetX, targetY) {
-		// =================================================================
-		//  DEBUG STEP 1: Validate incoming data
-		// =================================================================
-		if (!player || typeof player.x === 'undefined' || typeof targetX === 'undefined') {
-			console.error('[MeleeManager] SWING FAILED: Invalid data received.', { player, targetX, targetY });
-			return; // Stop execution if data is bad
-		}
-		console.log(`[MeleeManager] Swing initiated. Player at (${player.x.toFixed(2)}, ${player.y.toFixed(2)}), Target at (${targetX.toFixed(2)}, ${targetY.toFixed(2)})`);
-
-		// =================================================================
-		//  STEP 2: Calculate angle and position
-		// =================================================================
 		const angle = Phaser.Math.Angle.Between(player.x, player.y, targetX, targetY);
 		const slashX = player.x + Math.cos(angle) * SLASH_OFFSET;
 		const slashY = player.y + Math.sin(angle) * SLASH_OFFSET;
 
-		// DEBUG: Check the calculated values
-		if (isNaN(angle) || isNaN(slashX)) {
-			console.error('[MeleeManager] SWING FAILED: Calculation resulted in NaN.', { angle, slashX, slashY });
-			return;
-		}
-		console.log(`[MeleeManager] Calculated Angle: ${Phaser.Math.RadToDeg(angle).toFixed(2)} deg, Position: (${slashX.toFixed(2)}, ${slashY.toFixed(2)})`);
-
-		// =================================================================
-		//  STEP 3: Create and configure the sprite
-		// =================================================================
 		const slash = this.scene.add.sprite(slashX, slashY, this.textureKey);
 
-		// **CRITICAL CHANGE**: The origin needs to match how the texture was drawn.
-		// Since our curve is now drawn at the top of the texture area (from y=0 to y=SLASH_CURVE),
-		// the vertical center of the *drawn pixels* is at y=0.5 of that height.
-		// The horizontal center is at x=0.5. So the origin should be (0.5, 0.5).
 		slash.setOrigin(0.5, 0.5);
 
-		slash.setRotation(angle);
-		slash.setDepth(player.depth + 1); // Draw in front
-		slash.setAlpha(1); // Explicitly set alpha to 1 before tweening
+		// Apply the final rotation: the angle to the cursor PLUS 90 degrees.
+		slash.setRotation(angle + Phaser.Math.DegToRad(90));
 
-		// DEBUG: Log the created sprite object
-		console.log('[MeleeManager] Slash sprite created:', slash);
+		slash.setDepth(player.depth + 1);
 
-		// =================================================================
-		//  STEP 4: Animate and clean up
-		// =================================================================
 		this.scene.tweens.add({
 			targets: slash,
 			alpha: { from: 1, to: 0 },
@@ -583,7 +531,6 @@ class MeleeManager {
 			duration: 200,
 			ease: 'Power2',
 			onComplete: () => {
-				console.log('[MeleeManager] Tween complete, destroying slash sprite.');
 				slash.destroy();
 			}
 		});
