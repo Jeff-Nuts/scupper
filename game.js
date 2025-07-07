@@ -14,7 +14,7 @@ const WALL_JUMP_KICKOFF_X = 200;
 const WALL_JUMP_KICKOFF_Y = 400;
 
 // Dash constants
-const DASH_SPEED = 500;
+const DASH_SPEED = 1000;
 const DASH_DURATION = 180; // in milliseconds
 const DASH_INVINCIBILITY_DURATION = 200; // in milliseconds
 const MAX_DASHES = 3;
@@ -23,13 +23,13 @@ const DASH_REPLENISH_COOLDOWN = 1500; // 1.5 seconds
 // Combat Constants
 const PLAYER_SHOOT_COOLDOWN = 80;
 const MELEE_RANGE = 300;
-const MELEE_COOLDOWN = 400;
+const MELEE_COOLDOWN = 0 ;
 const MELEE_KNOCKBACK_FORCE = 2000;
 const MELEE_ANIMATION_DURATION = 180;
 const STUN_DURATION = 1000;
-const SLASH_WIDTH = 300;  // The length of the slash arc.
+const SLASH_WIDTH = 100;  // The length of the slash arc.
 const SLASH_CURVE = 90;   // How much the slash curves. Higher number = bigger arc.
-const SLASH_OFFSET =50;  // NEW: How far from the player's center the slash appears.
+const SLASH_OFFSET =300;  // NEW: How far from the player's center the slash appears.
 
 
 // Enemy-specific constants
@@ -142,6 +142,8 @@ class Player extends Phaser.Physics.Arcade.Sprite {
 	takeDamage(amount) {
 		if (this.isInvincible) return;
 		this.health -= amount;
+		this.scene.cameras.main.shake(150, 0.015); // Duration: 150ms, Intensity: 0.015
+
 		this.scene.tweens.add({
 			targets: this,
 			alpha: 0.5,
@@ -195,12 +197,12 @@ class BaseEnemy extends Phaser.Physics.Arcade.Sprite {
 		scene.physics.add.existing(this);
 		this.setCollideWorldBounds(true);
 		this.body.setSize(1, 1);
-		this.setDrag(500, 0);
+		// Use a higher drag to make movement less slippery and more controlled.
+		this.setDrag(1500, 0); 
 		this.health = 100;
 		this.maxHealth = 100;
 		this.speed = 150;
 		this.jumpPower = 450;
-		this.direction = 'left';
 		this.isStunned = false;
 		this.lastShotTime = 0;
 		this.shootCooldown = BASE_ENEMY_SHOOT_COOLDOWN;
@@ -208,33 +210,46 @@ class BaseEnemy extends Phaser.Physics.Arcade.Sprite {
 		this.wallJumpsRemaining = MAX_WALL_JUMPS;
 		this.wallSlideSpeed = WALL_SLIDE_SPEED / 2;
 	}
+
 	performWallJump() {
 		if (this.wallJumpsRemaining <= 0) return;
+
 		const onLeftWall = this.body.blocked.left;
 		const onRightWall = this.body.blocked.right;
 		if (!onLeftWall && !onRightWall) return;
+
 		this.wallJumpsRemaining--;
-		const kickX = onLeftWall ? WALL_JUMP_KICKOFF_X : -WALL_JUMP_KICKOFF_X;
+
+		// A more controlled wall-kick
+		const kickX = onLeftWall ? WALL_JUMP_KICKOFF_X * 0.8 : -WALL_JUMP_KICKOFF_X * 0.8;
 		this.setVelocityY(-WALL_JUMP_KICKOFF_Y * 0.9);
 		this.setVelocityX(kickX);
-		this.direction = onLeftWall ? 'right' : 'left';
 	}
+
 	applySeparation() {
 		let separationX = 0;
+		let separationY = 0; // Added Y separation for better group dynamics
+
 		this.scene.enemies.getChildren().forEach(otherEnemy => {
 			if (otherEnemy === this || !otherEnemy.active) return;
 			const distance = Phaser.Math.Distance.Between(this.x, this.y, otherEnemy.x, otherEnemy.y);
 			if (distance < ENEMY_SEPARATION_RADIUS) {
 				const pushForce = (ENEMY_SEPARATION_RADIUS - distance) / ENEMY_SEPARATION_RADIUS;
 				separationX += (this.x - otherEnemy.x) * pushForce;
+				separationY += (this.y - otherEnemy.y) * pushForce; // Apply vertical push
 			}
 		});
-		const totalSeparation = new Phaser.Math.Vector2(separationX, 0);
+
+		const totalSeparation = new Phaser.Math.Vector2(separationX, separationY);
 		if (totalSeparation.length() > 0) {
 			totalSeparation.normalize().scale(ENEMY_SEPARATION_FORCE);
-			this.setAccelerationX(this.body.acceleration.x + totalSeparation.x);
+			// Apply separation as a velocity impulse rather than acceleration for more immediate effect
+			this.body.velocity.x += totalSeparation.x * (this.body.delta / 1000);
+			this.body.velocity.y += totalSeparation.y * (this.body.delta / 1000);
 		}
 	}
+
+
 	stunAndKnockback(fromX, fromY) {
 		this.isStunned = true;
 		const angle = Phaser.Math.Angle.Between(fromX, fromY, this.x, this.y);
@@ -244,6 +259,7 @@ class BaseEnemy extends Phaser.Physics.Arcade.Sprite {
 			this.isStunned = false;
 		});
 	}
+
 	takeDamage(amount) {
 		this.health -= amount;
 		if (this.health <= 0) {
@@ -251,6 +267,7 @@ class BaseEnemy extends Phaser.Physics.Arcade.Sprite {
 			this.destroy();
 		}
 	}
+
 	shootAtPlayer(time) {
 		const player = this.scene.player;
 		if (!player.active || !player.body) return;
@@ -260,6 +277,7 @@ class BaseEnemy extends Phaser.Physics.Arcade.Sprite {
 			this.scene.enemyPellets.fire(this.x, spawnY, player.x, player.y);
 		}
 	}
+
 	update(time, delta) {
 		if (!this.active) return;
 		const barWidth = 30;
@@ -270,41 +288,53 @@ class BaseEnemy extends Phaser.Physics.Arcade.Sprite {
 		this.healthBar.clear()
 			.fillStyle(0x550000).fillRect(barX, barY, barWidth, barHeight)
 			.fillStyle(0x00ff00).fillRect(barX, barY, barWidth * healthPercentage, barHeight);
+
 		if (this.isStunned) {
 			this.setTint(0x800080);
-			this.setAcceleration(0, 0);
-			return;
+			return; // Stop all other logic if stunned
 		}
-		this.setAccelerationX(0);
+
+		// Reset tint if not stunned
+		this.setTint(this.baseTint || 0xffffff);
+
 		const onGround = this.body.blocked.down;
 		const onWall = this.body.blocked.left || this.body.blocked.right;
+
 		if (onGround) {
 			this.wallJumpsRemaining = MAX_WALL_JUMPS;
 		}
 		if (onWall && !onGround && this.body.velocity.y > 0) {
 			this.setVelocityY(this.wallSlideSpeed);
 		}
+
 		this.updateAI(time, delta);
 		this.applySeparation();
+
 		if (this.y > this.scene.sys.game.config.height + 50) {
 			this.setPosition(425, 140);
 			this.setVelocity(0, 0);
 			this.health = this.maxHealth;
 		}
 	}
-	updateAI(time, delta) {}
+
+	updateAI(time, delta) {
+		// This method is intended to be overridden by subclasses.
+	}
 }
 
 class MeleeEnemy extends BaseEnemy {
 	constructor(scene, x, y) {
 		super(scene, x, y);
-		this.setTint(0xff0000);
-		this.speed = 800;
+		this.baseTint = 0xff0000;
+		this.setTint(this.baseTint);
+		this.speed = 180; // Adjusted for velocity-based movement
+		this.jumpPower = 480;
 		this.lastMeleeTime = 0;
 		this.health = 150;
 		this.maxHealth = 150;
 		this.hasSpottedPlayer = false;
 	}
+
 	performMelee(player, time) {
 		this.lastMeleeTime = time;
 		player.takeDamage(MELEE_ENEMY_DAMAGE);
@@ -317,43 +347,69 @@ class MeleeEnemy extends BaseEnemy {
 			ease: 'Power1'
 		});
 	}
+
 	updateAI(time, delta) {
-		this.setTint(this.hasSpottedPlayer ? 0xFF4500 : 0xff0000);
 		const player = this.scene.player;
-		if (!player.active) return;
-		const horizontalDist = player.x - this.x;
-		const verticalDist = player.y - this.y;
+		if (!player.active) {
+			this.setVelocityX(0);
+			return;
+		}
+
+		// --- AI State Properties ---
 		const distance = Phaser.Math.Distance.Between(this.x, this.y, player.x, player.y);
-		const onWall = this.body.blocked.left || this.body.blocked.right;
+		const horizontalDist = player.x - this.x;
 		const onGround = this.body.blocked.down;
+		const onWall = this.body.blocked.left || this.body.blocked.right;
 		const playerIsAbove = player.y < this.y - this.height;
+		const isStuckOnWall = (this.body.blocked.left && horizontalDist < 0) || (this.body.blocked.right && horizontalDist > 0);
+
+		// --- Aggro Logic ---
 		if (!this.hasSpottedPlayer && distance < MELEE_ENEMY_INITIAL_AGGRO_RANGE) {
 			this.hasSpottedPlayer = true;
 		}
-		if (this.hasSpottedPlayer) {
-			if (distance > MELEE_ENEMY_ATTACK_RANGE - 5) {
-				if (horizontalDist > 0) this.setAccelerationX(this.speed);
-				else this.setAccelerationX(-this.speed);
-			} else {
-				this.setAccelerationX(0);
-			}
+		
+		// Set tint based on aggro state for visual feedback
+		this.setTint(this.hasSpottedPlayer ? 0xFF4500 : this.baseTint);
+		
+		if (!this.hasSpottedPlayer) {
+			this.setVelocityX(0);
+			return; // Do nothing if player is not spotted
 		}
+
+		// --- Combat Logic ---
 		if (distance < MELEE_ENEMY_ATTACK_RANGE && time > this.lastMeleeTime + MELEE_ENEMY_COOLDOWN) {
 			this.performMelee(player, time);
-		}
-		if (onWall && !onGround && playerIsAbove) {
-			this.performWallJump();
+			this.setVelocityX(0); // Stop moving to attack
 			return;
 		}
-		if (onGround && verticalDist < -this.height * 2) {
-			this.setVelocityY(-this.jumpPower);
+
+		// --- Navigation Logic (Hierarchy of Actions) ---
+
+		// 1. Highest Priority: Wall jumping to chase upwards
+		if (onWall && !onGround && playerIsAbove) {
+			this.performWallJump();
+			return; // Wall jump is a complete action for this frame
 		}
-		if (onGround && Math.abs(horizontalDist) > this.width) {
-			const lookAheadX = this.x + (this.direction === 'right' ? this.width : -this.width);
-			const wallInFront = this.scene.platforms.getChildren().some(p =>
-				p.body.hitTest(lookAheadX, this.y) && p.body.height > this.height
-			);
-			if (wallInFront) this.setVelocityY(-this.jumpPower);
+
+		// 2. Jumping to get over obstacles or start climbing
+		if (onGround) {
+			// Jump if running into a wall that's in the way
+			if (isStuckOnWall) {
+				this.setVelocityY(-this.jumpPower);
+			} 
+			// Jump if the player is significantly higher, to start an ascent
+			else if (playerIsAbove && Math.abs(horizontalDist) < 200) { 
+				this.setVelocityY(-this.jumpPower * 0.9);
+			}
+		}
+
+		// 3. Default horizontal movement: Chase the player
+		if (distance > MELEE_ENEMY_ATTACK_RANGE - 5) {
+			// Move towards the player using velocity for direct control
+			this.setVelocityX(Math.sign(horizontalDist) * this.speed);
+		} else {
+			// If we are close but not attacking, stop moving.
+			this.setVelocityX(0);
 		}
 	}
 }
@@ -361,49 +417,83 @@ class MeleeEnemy extends BaseEnemy {
 class ShooterEnemy extends BaseEnemy {
 	constructor(scene, x, y) {
 		super(scene, x, y);
-		this.setTint(0x32a852);
-		this.speed = 700;
+		this.baseTint = 0x32a852;
+		this.setTint(this.baseTint);
+		this.speed = 160; // Adjusted for velocity-based movement
+		this.jumpPower = 500;
 		this.shootCooldown = SHOOTER_ENEMY_SHOOT_COOLDOWN;
 	}
+
 	hasLineOfSight(target) {
-		const lineOfSight = new Phaser.Geom.Line(this.x, this.y, target.x, target.y);
+		const lineOfSight = new Phaser.Geom.Line(this.x, this.y - 10, target.x, target.y); // Check from the "head"
 		const platforms = this.scene.platforms.getChildren();
 		for (let i = 0; i < platforms.length; i++) {
 			const plat = platforms[i];
 			const platBounds = plat.getBounds();
-			if (Phaser.Geom.Intersects.LineToRectangle(lineOfSight, platBounds)) return false;
+			if (Phaser.Geom.Intersects.LineToRectangle(lineOfSight, platBounds)) {
+				return false;
+			}
 		}
 		return true;
 	}
+
 	updateAI(time, delta) {
-		this.setTint(0x32a852);
 		const player = this.scene.player;
-		if (!player.active) return;
-		const distance = Phaser.Math.Distance.Between(this.x, this.y, player.x, player.y);
-		const hasLOS = this.hasLineOfSight(player);
-		const onWall = this.body.blocked.left || this.body.blocked.right;
-		const onGround = this.body.blocked.down;
-		if (onWall && !onGround && this.body.velocity.y >= 0) {
-			this.performWallJump();
+		if (!player.active) {
+			this.setVelocityX(0);
 			return;
 		}
+
+		// --- AI State Properties ---
+		const distance = Phaser.Math.Distance.Between(this.x, this.y, player.x, player.y);
+		const hasLOS = this.hasLineOfSight(player);
+		const onGround = this.body.blocked.down;
+		const onWall = this.body.blocked.left || this.body.blocked.right;
+		const playerIsAbove = player.y < this.y - (this.height * 1.5);
+		const horizontalDist = player.x - this.x;
+		const isStuckOnWall = (this.body.blocked.left && horizontalDist < 0) || (this.body.blocked.right && horizontalDist > 0);
+
+		// --- Navigation Priority 1: Vertical Movement ---
+		// Always try to get to a better vantage point if on a wall and player is above.
+		if (onWall && !onGround && playerIsAbove) {
+			this.performWallJump();
+			return; // Wall jump is a complete action
+		}
+
+		// --- Main Logic: Kiting (with LOS) vs Repositioning (no LOS) ---
 		if (hasLOS) {
+			// --- STATE: KITING ---
+			// We can see the player, so shoot and maintain optimal distance.
 			this.shootAtPlayer(time);
+
 			if (distance < SHOOTER_MIN_FLEE_DISTANCE) {
-				if (player.x < this.x) this.setAccelerationX(this.speed);
-				else this.setAccelerationX(-this.speed);
+				// Too close, flee by moving away from the player.
+				this.setVelocityX(-Math.sign(horizontalDist) * this.speed);
 			} else if (distance > SHOOTER_MAX_ENGAGE_DISTANCE) {
-				if (player.x > this.x) this.setAccelerationX(this.speed);
-				else this.setAccelerationX(-this.speed);
+				// Too far, close the distance to get in range.
+				this.setVelocityX(Math.sign(horizontalDist) * this.speed);
 			} else {
-				this.setAccelerationX(0);
+				// In the sweet spot, stop horizontal movement to stabilize aim.
+				this.setVelocityX(0);
 			}
 		} else {
-			if (player.x > this.x) this.setAccelerationX(this.speed * 0.75);
-			else this.setAccelerationX(-this.speed * 0.75);
+			// --- STATE: REPOSITIONING ---
+			// We can't see the player. The goal is to move to a position where we might get LOS.
+			// Move towards the player's X coordinate.
+			this.setVelocityX(Math.sign(horizontalDist) * this.speed * 0.85);
 		}
-		if (onGround && (this.body.blocked.left || this.body.blocked.right)) {
-			this.setVelocityY(-this.jumpPower * 0.8);
+
+		// --- Navigation Priority 2: Grounded Jumps ---
+		// This logic runs regardless of LOS, helping the enemy navigate the level.
+		if (onGround) {
+			// If we are moving into a wall, jump to get over it.
+			if (isStuckOnWall) {
+				this.setVelocityY(-this.jumpPower);
+			}
+			// If we don't have LOS and the player is way above, make a speculative jump to start climbing.
+			else if (!hasLOS && playerIsAbove) {
+				this.setVelocityY(-this.jumpPower * 0.9);
+			}
 		}
 	}
 }
@@ -502,8 +592,8 @@ class MeleeManager {
 			new Phaser.Math.Vector2(SLASH_WIDTH / 2, 0),
 			new Phaser.Math.Vector2(SLASH_WIDTH, SLASH_CURVE)
 		);
-		for (let i = 0; i < 7; i++) {
-			graphics.lineStyle(18 - (i * 2.5), 0xffffff, 1.0 - (i * 0.15));
+		for (let i = 0; i < 70; i++) {
+			graphics.lineStyle(300 - (i * 2.5), 0xffffff, 1.0 - (i * 0.15));
 			curve.draw(graphics);
 		}
 		graphics.generateTexture(this.textureKey, SLASH_WIDTH, SLASH_CURVE);
@@ -722,7 +812,7 @@ class GameScene extends Phaser.Scene {
 	}
 	handlePlayerPelletHitEnemy(enemy, pellet) {
 		pellet.destroy();
-		enemy.takeDamage(10);
+		enemy.takeDamage(20);
 	}
 	handleEnemyPelletHitPlayer(player, pellet) {
 		pellet.destroy();
